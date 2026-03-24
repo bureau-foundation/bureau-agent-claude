@@ -1,18 +1,16 @@
 # Copyright 2026 The Bureau Authors
 # SPDX-License-Identifier: Apache-2.0
 
-# Claude Code agent template for Bureau. Composes the Bureau agent
-# driver wrapper (bureau-agent-claude) with the Claude Code CLI and
-# developer tooling into a single sandbox environment.
+# Claude Code agent template for Bureau. Provides the non-Bureau
+# tools that a Claude Code agent needs inside its sandbox: the
+# Claude Code CLI, developer tools (git, gh), and language runtimes.
 #
-# The bureau-agent-claude binary lives in the Bureau monorepo and
-# manages the full agent lifecycle: spawning Claude Code with
-# stream-json output, writing .claude/settings.local.json for hooks
-# and MCP, parsing events into the Bureau agent driver pipeline, and
-# persisting DriverSessionID for --resume across sandbox cycles.
-#
-# This flake owns the template definition and environment composition.
-# The binary will migrate here once the Go SDK is extracted.
+# Bureau platform binaries (bureau-agent-claude, bureau CLI, etc.)
+# are provided by the daemon via bureau-sandbox-env — they are NOT
+# included here. This flake has no Bureau *package* dependency and
+# can be updated independently (e.g., to bump Claude Code version).
+# Bureau is an input only for lib.presets and lib.modules (pure
+# functions over nixpkgs that define tool groupings).
 {
   description = "Claude Code agent template for Bureau sandboxes";
 
@@ -25,10 +23,6 @@
 
   inputs = {
     bureau.url = "github:bureau-foundation/bureau";
-    # Follow Bureau's nixpkgs pin to prevent version skew in shared
-    # dependencies (glibc, git, openssl, etc.). Claude Code comes from
-    # this same nixpkgs — to bump it independently, override the
-    # claude-code package rather than breaking the follows.
     nixpkgs.follows = "bureau/nixpkgs";
     flake-utils.follows = "bureau/flake-utils";
   };
@@ -49,34 +43,22 @@
             pkg: builtins.elem (nixpkgs.lib.getName pkg) [ "claude-code" ];
         };
 
-        # Bureau agent driver wrapper — manages Claude Code lifecycle
-        # within the Bureau event pipeline.
-        agentClaude = bureau.packages.${system}.bureau-agent-claude;
-
-        # Bureau CLI — launched as an MCP server subprocess by Claude
-        # Code for Bureau tool access (tickets, artifacts, observation).
-        bureauCli = bureau.packages.${system}.bureau;
-
-        # Composed sandbox environment. Everything a Claude Code agent
-        # needs: the driver wrapper, Claude Code CLI, Bureau CLI for
-        # MCP, developer tools (git, gh), and language runtimes (node,
-        # python for tool use within sandboxed projects).
-        agentEnvironment = pkgs.buildEnv {
-          name = "bureau-agent-claude-env";
+        # Agent tools: everything a Claude Code agent needs beyond
+        # Bureau's own platform binaries (which the daemon provides
+        # via bureau-sandbox-env PATH injection).
+        #
+        # Uses Bureau's preset/module system for tool groupings —
+        # these are pure functions over nixpkgs, not Bureau packages.
+        agentTools = pkgs.buildEnv {
+          name = "bureau-agent-claude-tools";
           paths =
-            [
-              agentClaude
-              bureauCli
-              pkgs.claude-code
-            ]
-            ++ bureau.lib.bureauRuntime pkgs
-            ++ [ bureau.packages.${system}.bureau-sandbox-env ]
+            [ pkgs.claude-code ]
             ++ bureau.lib.presets.developer pkgs
             ++ bureau.lib.applyModules bureau.lib.modules.runtime pkgs;
         };
       in
       {
-        packages.default = agentEnvironment;
+        packages.default = agentTools;
 
         # Bureau template definition. Published to Matrix via:
         #   bureau template publish --flake github:bureau-foundation/bureau-agent-claude
@@ -84,16 +66,24 @@
         # Field names use snake_case matching TemplateContent JSON wire
         # format (lib/schema/events_template.go in Bureau).
         #
-        # Inherits from bureau-agent, which provides:
-        #   - agent-base: proxy socket, MACHINE_NAME, SERVER_NAME env vars
+        # Inherits from agent-base, which provides:
         #   - base-networked: host network, DNS, SSL
         #   - base: namespace isolation, security defaults, /tmp
-        #   - required_services: ["agent", "artifact"]
+        #   - Proxy socket, MACHINE_NAME, SERVER_NAME env vars
+        #
+        # The command uses a bare name — the daemon resolves it from
+        # bureau-sandbox-env on PATH. The environment field provides
+        # this flake's tools; the daemon prepends sandbox-env/bin
+        # so Bureau binaries are also available.
         bureauTemplate = {
           description = "Claude Code agent with Bureau sandbox, MCP integration, and session persistence";
-          inherits = [ "bureau/template:bureau-agent" ];
-          command = [ "${agentClaude}/bin/bureau-agent-claude" ];
-          environment = "${agentEnvironment}";
+          inherits = [ "bureau/template:agent-base" ];
+          command = [ "bureau-agent-claude" ];
+          environment = "${agentTools}";
+          required_services = [
+            "agent"
+            "artifact"
+          ];
         };
       }
     );

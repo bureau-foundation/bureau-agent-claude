@@ -6,38 +6,27 @@ persistence across sandbox cycles, and full Bureau agent lifecycle management.
 
 ## What this provides
 
-A Nix flake that composes the Bureau agent driver wrapper (`bureau-agent-claude`)
-with the Claude Code CLI and developer tooling into a sandbox environment, then
-exports it as a Bureau template.
+A Nix flake that composes the non-Bureau tools a Claude Code agent needs:
+the Claude Code CLI, developer tools (git, gh, node, python), and standard
+Unix utilities. Bureau platform binaries (`bureau-agent-claude`, `bureau` CLI,
+etc.) are provided by the daemon via `bureau-sandbox-env` PATH injection —
+they are NOT included in this closure.
 
-The composed environment includes:
-
-- **bureau-agent-claude** — Bureau agent driver wrapper (manages Claude Code
-  lifecycle, event parsing, session state, checkpoint persistence)
-- **claude-code** — Claude Code CLI (the AI coding assistant)
-- **bureau** — Bureau CLI (launched as MCP server for Bureau tool access)
-- **Developer tools** — git, gh, nano, Node.js, Python, and standard Unix tools
+This means bumping Claude Code version requires updating this repo only,
+not Bureau itself.
 
 ## Architecture
 
 ```
-bureau-agent-claude (driver wrapper)
-    │
-    ├── Spawns: claude --output-format stream-json --print --verbose
-    │   ├── Claude Code reads .claude/settings.local.json
-    │   │   ├── Hooks → bureau-agent-claude hook <event>
-    │   │   └── MCP servers → bureau mcp serve
-    │   └── Produces stream-json events on stdout
-    │
-    ├── Parses events → Bureau agent driver pipeline
-    │   ├── Session lifecycle (start/end via agent service socket)
-    │   ├── Metrics aggregation (token counts, tool usage)
-    │   └── Context checkpointing (CAS artifact store)
-    │
-    └── Session persistence
-        ├── DriverSessionID → --resume <id> on next sandbox cycle
-        └── .claude/ directory → persisted via artifact bindings
+Daemon provides (via sandbox-env):        This repo provides (via environment):
+  bureau-agent-claude                       claude (Claude Code CLI)
+  bureau (CLI, MCP server)                  git, gh, node, python, bun
+  bureau-proxy-call                         bash, coreutils, curl, openssl
+  bureau-pipeline-executor                  and other developer tools
 ```
+
+Both are composed into the sandbox's PATH by the launcher:
+`sandbox-env/bin : template-environment/bin : /usr/local/bin:/usr/bin:/bin`
 
 ## Deployment
 
@@ -58,56 +47,39 @@ bureau workspace create my-project \
     --agent-count 3
 ```
 
-Each agent gets its own sandbox with independent session state, checkpoint
-chains, and resume capability. Session persistence survives sandbox restarts
-(binary updates, environment transitions, manual restarts).
-
 ### 3. Observe
 
 ```bash
-# Single agent
 bureau observe agent/my-project/0
-
-# All agents on this machine
 bureau dashboard
 ```
 
 ## Updates
 
-To update the template (after a Claude Code version bump in nixpkgs, or a
-Bureau release with driver changes):
+To bump Claude Code version:
 
 ```bash
-# In this repo: update inputs, rebuild
-nix flake update
-nix build
-
-# Re-publish to the fleet
-bureau template publish --flake github:bureau-foundation/bureau-agent-claude \
-    --room <your-template-room>
+nix flake update     # Updates nixpkgs (which includes claude-code)
+nix build            # Verify it builds
+git add -A && git commit -m "Bump claude-code to X.Y.Z"
+git push
 ```
 
-The daemon detects the template change via /sync and restarts affected
-sandboxes automatically, preserving session state through the cycle.
+Then re-publish the template. The daemon detects the template change via
+/sync and restarts affected sandboxes, preserving session state.
 
 ## Binary cache
 
-This flake is configured to use Bureau's R2 binary cache at
-`cache.infra.bureau.foundation`. CI pushes signed closures on every merge to
-main, so `nix build` and `bureau template publish --flake` fetch pre-built
-binaries rather than compiling from source.
+CI pushes signed closures to `cache.infra.bureau.foundation` on every merge
+to main. `nix build` and `bureau template publish --flake` fetch pre-built
+binaries from the cache.
 
 ## Development
 
 ```bash
-# Build the composed environment
-nix build
-
-# Evaluate the template output
-nix eval --json .#bureauTemplate.x86_64-linux | jq .
-
-# Check what's in the environment
-ls -la result/bin/
+nix build                                              # Build tools closure
+nix eval --json .#bureauTemplate.x86_64-linux | jq .   # Inspect template
+ls -la result/bin/                                      # See what's included
 ```
 
 ## License
